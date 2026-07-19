@@ -149,7 +149,7 @@ class ProxyConfig:
         if self.tool_result_projection_store_dir:
             data["proxy"]["tool_result_projection_store_dir"] = self.tool_result_projection_store_dir
         path.write_text(tomli_w.dumps(data), encoding="utf-8")
-        logger.info("配置已保存到 %s", path)
+        logger.debug("配置已保存到 %s", path)
         return path
 
     @classmethod
@@ -157,7 +157,7 @@ class ProxyConfig:
         if path is None:
             found = cls.find_config()
             if found is None:
-                logger.info("未找到配置文件，使用默认配置")
+                logger.debug("未找到配置文件，使用默认配置")
                 return cls()
             path = found
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -175,7 +175,7 @@ class ProxyConfig:
         router_section = raw.get("squilla_router", {})
         if isinstance(router_section, dict) and router_section:
             cfg.router = SquillaRouterConfig(**router_section)
-        logger.info("配置已从 %s 加载", path)
+        logger.debug("配置已从 %s 加载", path)
         return cfg
 
     @classmethod
@@ -199,7 +199,7 @@ class ProxyConfig:
                     result["base_url"] = base_url
                 if api_key:
                     result["api_key"] = api_key
-                logger.info("从 %s 检测到: base_url=%s", settings_path, result["base_url"])
+                logger.debug("从 %s 检测到: base_url=%s", settings_path, result["base_url"])
                 break
             except (json.JSONDecodeError, OSError):
                 continue
@@ -557,7 +557,7 @@ class ClaudeCodeProxy:
         }
 
         strategy_name = self.router.runtime_status().get("strategy", "heuristic")
-        logger.info("代理初始化: target=%s, strategy=%s", self.target_base_url, strategy_name)
+        logger.debug("代理初始化: target=%s, strategy=%s", self.target_base_url, strategy_name)
 
     # ---- 路由决策 ----
 
@@ -680,7 +680,7 @@ class ClaudeCodeProxy:
 
         modified["messages"] = messages
         if projected_count:
-            logger.info(
+            logger.debug(
                 "tool_result_projection | projected=%d | saved_chars=%d",
                 projected_count, saved_chars,
             )
@@ -951,26 +951,45 @@ class ClaudeCodeProxy:
                 "routing_extra": {},
                 "metadata": {},
             }
-            logger.info("text_mode_override | session=%s | model=%s | msg_len=%d | msg=%.60s",
+            logger.debug("text_mode_override | session=%s | model=%s | msg_len=%d | msg=%.60s",
                         session_key, text_mode_model, len(user_message), user_message)
             # 从 body 中提取最新用户消息（标记已被移除），用于后续流程
             user_message, _ = self._extract_user_message(body)
         else:
-            # 未检测到 @model:xxx → 检查是否是工具调用子请求
+            # 未检测到 @model:xxx → 判断是否是新的用户消息
             messages = body.get("messages", [])
             latest_role = messages[-1].get("role", "") if messages else ""
-            # Anthropic API 中工具结果以 role=user + type=tool_result 块传递，
-            # 兼容 role=tool 的旧格式。
+            # 工具结果不算新用户消息（role=user + type=tool_result 块）
+            _last_msg = messages[-1] if messages else {}
+            _last_content = _last_msg.get("content", "")
             _is_tool_result = (
-                latest_role == "user"
-                and isinstance(messages[-1].get("content"), list)
+                isinstance(_last_content, list)
                 and any(
                     isinstance(b, dict) and b.get("type") == "tool_result"
-                    for b in messages[-1].get("content", [])
+                    for b in _last_content
                 )
             )
-            if (latest_role == "tool" or _is_tool_result) and session_key in self._text_mode_hold:
-                # 工具调用子请求 → 使用缓存中的模型
+            _is_new_user = latest_role == "user" and not _is_tool_result
+            _block_types = (
+                [b.get("type", "") for b in _last_content if isinstance(b, dict)]
+                if isinstance(_last_content, list)
+                else []
+            )
+            logger.debug("text_mode_debug2 | session=%s | role=%s | content_type=%s | block_types=%s | is_tool_result=%s | is_new_user=%s | in_cache=%s",
+                         session_key, latest_role,
+                         type(_last_content).__name__,
+                         _block_types,
+                         _is_tool_result, _is_new_user,
+                         session_key in self._text_mode_hold)
+            if _is_new_user and session_key in self._text_mode_hold:
+                # 新用户消息，没指定模型 → 清除缓存，走自动路由
+                self._text_mode_hold.pop(session_key, None)
+                route = await self._route(user_message, session_key, body)
+                logger.debug("路由 | session=%s | tier=%s | model=%s | conf=%.2f | source=%s | msg_len=%d | msg=%.60s",
+                            session_key, route["tier"], route["model"], route["confidence"],
+                            route["source"], len(user_message), user_message)
+            elif session_key in self._text_mode_hold:
+                # 非新用户消息（工具结果等），有缓存 → 用缓存
                 cached_model, _cached_ts = self._text_mode_hold[session_key]
                 route = {
                     "tier": "text_mode",
@@ -984,13 +1003,12 @@ class ClaudeCodeProxy:
                     "routing_extra": {},
                     "metadata": {},
                 }
-                logger.info("text_mode_override_cached | session=%s | model=%s | msg_len=%d",
+                logger.debug("text_mode_override_cached | session=%s | model=%s | msg_len=%d",
                             session_key, cached_model, len(user_message))
             else:
-                # 新用户消息或缓存不存在 → 清除缓存，走正常路由
-                self._text_mode_hold.pop(session_key, None)
+                # 没缓存 → 走自动路由
                 route = await self._route(user_message, session_key, body)
-                logger.info("路由 | session=%s | tier=%s | model=%s | conf=%.2f | source=%s | msg_len=%d | msg=%.60s",
+                logger.debug("路由 | session=%s | tier=%s | model=%s | conf=%.2f | source=%s | msg_len=%d | msg=%.60s",
                             session_key, route["tier"], route["model"], route["confidence"],
                             route["source"], len(user_message), user_message)
 
@@ -1207,6 +1225,7 @@ Claude Code 配置 (.claude/settings.json):
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%H:%M:%S",
     )
+    logging.getLogger("claude-code-proxy").setLevel(logging.DEBUG)
 
     import uvicorn
 
@@ -1237,35 +1256,35 @@ Claude Code 配置 (.claude/settings.json):
     app = create_app(proxy)
 
     api_key_display = "***" if cfg.api_key else "从请求头读取"
-    logger.info("═" * 54)
-    logger.info("  🚀 OpenSquilla Router Standalone")
-    logger.info("═" * 54)
-    logger.info(f"  监听地址:  http://{cfg.host}:{cfg.port}")
-    logger.info(f"  目标 API:  {cfg.target_base_url}")
-    logger.info(f"  API Key:   {api_key_display}")
-    logger.info("")
-    logger.info("  📊 Tier 配置:")
+    logger.debug("═" * 54)
+    logger.debug("  🚀 OpenSquilla Router Standalone")
+    logger.debug("═" * 54)
+    logger.debug(f"  监听地址:  http://{cfg.host}:{cfg.port}")
+    logger.debug(f"  目标 API:  {cfg.target_base_url}")
+    logger.debug(f"  API Key:   {api_key_display}")
+    logger.debug("")
+    logger.debug("  📊 Tier 配置:")
     for tier in TEXT_TIERS:
         tcfg = cfg.router.tiers.get(tier, {})
-        logger.info(f"     {tier} → {tcfg.get('model')}  (ctx={tcfg.get('context_window')})")
-    logger.info("")
+        logger.debug(f"     {tier} → {tcfg.get('model')}  (ctx={tcfg.get('context_window')})")
+    logger.debug("")
     strategy_info = proxy.router.runtime_status()
-    logger.info("  🧠 路由策略: %s", strategy_info.get("strategy"))
-    logger.info("  🧠 门控策略:")
-    logger.info(f"     置信度阈值: {cfg.router.confidence_threshold}")
-    logger.info(f"     反降级窗口: {cfg.router.kv_cache_anti_downgrade_window_seconds}s")
-    logger.info(f"     投诉升级:   {'启用' if cfg.router.complaint_upgrade_enabled else '禁用'}")
-    logger.info(f"     默认 Tier:  {cfg.router.default_tier}")
-    logger.info("")
-    logger.info("  📋 Claude Code 配置:")
-    logger.info(f"     ANTHROPIC_BASE_URL = http://{cfg.host}:{cfg.port}")
-    logger.info("     ANTHROPIC_API_KEY = <你的 API key>")
-    logger.info("     ANTHROPIC_MODEL = claude-sonnet-4-6")
-    logger.info("     ANTHROPIC_SMALL_FAST_MODEL = claude-haiku-4-5-20251001")
-    logger.info("")
-    logger.info(f"  📈 路由状态: http://{cfg.host}:{cfg.port}/router-status")
-    logger.info("  ⚙️  配置文件: 运行 --setup 重新配置")
-    logger.info("═" * 54)
+    logger.debug("  🧠 路由策略: %s", strategy_info.get("strategy"))
+    logger.debug("  🧠 门控策略:")
+    logger.debug(f"     置信度阈值: {cfg.router.confidence_threshold}")
+    logger.debug(f"     反降级窗口: {cfg.router.kv_cache_anti_downgrade_window_seconds}s")
+    logger.debug(f"     投诉升级:   {'启用' if cfg.router.complaint_upgrade_enabled else '禁用'}")
+    logger.debug(f"     默认 Tier:  {cfg.router.default_tier}")
+    logger.debug("")
+    logger.debug("  📋 Claude Code 配置:")
+    logger.debug(f"     ANTHROPIC_BASE_URL = http://{cfg.host}:{cfg.port}")
+    logger.debug("     ANTHROPIC_API_KEY = <你的 API key>")
+    logger.debug("     ANTHROPIC_MODEL = claude-sonnet-4-6")
+    logger.debug("     ANTHROPIC_SMALL_FAST_MODEL = claude-haiku-4-5-20251001")
+    logger.debug("")
+    logger.debug(f"  📈 路由状态: http://{cfg.host}:{cfg.port}/router-status")
+    logger.debug("  ⚙️  配置文件: 运行 --setup 重新配置")
+    logger.debug("═" * 54)
 
     config = uvicorn.Config(app, host=cfg.host, port=cfg.port, log_level=args.log_level)
     server = uvicorn.Server(config)
