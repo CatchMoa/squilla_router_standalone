@@ -63,6 +63,9 @@ _THINKING_BUDGET_TOKENS: dict[str, int] = {
     "xhigh": 32000,
 }
 
+# Text mode override: 用户消息中嵌入 @model:xxx 可跳过路由，直接使用指定模型
+TEXT_MODE_PATTERN = r"@model:(\S+)"
+
 # 默认模型映射
 DEFAULT_TIER_CONFIGS: dict[str, dict[str, str]] = {
     "c0": {"model": "claude-haiku-4-5-20251001", "description": "简单任务：快/便宜"},
@@ -728,6 +731,103 @@ class ClaudeCodeProxy:
 
         return body
 
+    # ---- Text mode override (跳过路由，直接使用指定模型) ----
+
+    def _extract_text_mode_override(self, body: dict) -> tuple[str | None, dict]:
+        """扫描最新一条用户消息，提取 ``@model:xxx`` 标记。
+
+        仅在最新一条 ``role=user`` 的消息中匹配，避免历史消息中的标记
+        影响当前轮次。返回 (model_name, cleaned_body)，cleaned_body 中
+        的标记已被移除，不会传递给目标 API。
+        """
+        import re
+        messages = body.get("messages", [])
+        if not messages:
+            return None, body
+
+        # 找到最新一条 role=user 的消息
+        last_user_idx = -1
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                last_user_idx = i
+                break
+
+        if last_user_idx < 0:
+            return None, body
+
+        msg = messages[last_user_idx]
+        content = msg.get("content", "")
+
+        if isinstance(content, str):
+            match = re.search(TEXT_MODE_PATTERN, content)
+            if match:
+                model_spec = match.group(1)
+                cleaned = re.sub(TEXT_MODE_PATTERN, "", content).strip()
+                # 清理开头/结尾可能残留的空格、逗号等
+                cleaned = cleaned.lstrip(",;:. \t\n\r").rstrip(",;:. \t\n\r")
+                resolved = self._resolve_text_mode_model(model_spec)
+                if resolved:
+                    new_messages = list(messages)
+                    new_messages[last_user_idx] = dict(msg)
+                    new_messages[last_user_idx]["content"] = cleaned
+                    modified_body = dict(body)
+                    modified_body["messages"] = new_messages
+                    return resolved, modified_body
+
+        elif isinstance(content, list):
+            # list 格式：遍历所有 text block
+            for block in reversed(content):
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") != "text":
+                    continue
+                text = block.get("text", "")
+                match = re.search(TEXT_MODE_PATTERN, text)
+                if match:
+                    model_spec = match.group(1)
+                    cleaned = re.sub(TEXT_MODE_PATTERN, "", text).strip()
+                    cleaned = cleaned.lstrip(",;:. \t\n\r").rstrip(",;:. \t\n\r")
+                    resolved = self._resolve_text_mode_model(model_spec)
+                    if resolved:
+                        new_messages = list(messages)
+                        new_blocks = list(content)
+                        for j, b in enumerate(content):
+                            if b is block:
+                                new_blocks[j] = dict(block)
+                                new_blocks[j]["text"] = cleaned
+                                break
+                        new_messages[last_user_idx] = dict(msg)
+                        new_messages[last_user_idx]["content"] = new_blocks
+                        modified_body = dict(body)
+                        modified_body["messages"] = new_messages
+                        return resolved, modified_body
+
+        return None, body
+
+    def _resolve_text_mode_model(self, model_spec: str) -> str | None:
+        """解析模型标识：如果是 tier（c0/c1/c2/c3），映射到配置的模型；否则直接用。
+
+        ``@model:c3`` → 读取 config.tiers[c3].model 返回具体模型 ID
+        ``@model:deepseek-v4-flash`` → 直接返回 ``deepseek-v4-flash``
+        """
+        from squilla_router_standalone.router_tiers import normalize_text_tier
+
+        spec = model_spec.strip()
+        if not spec:
+            return None
+
+        # 检查是否是 tier 名称
+        tier = normalize_text_tier(spec)
+        if tier:
+            entry = self.router.config.tiers.get(tier, {})
+            model = entry.get("model", "") if isinstance(entry, dict) else ""
+            if model:
+                return str(model)
+            logger.warning("text_mode: tier %s has no configured model, using raw spec %s", tier, spec)
+            return spec
+
+        return spec
+
     async def _route(self, message: str, session_key: str, body: dict) -> dict[str, Any]:
         attachments = self._extract_user_message(body)[1]
         input_tokens = self._estimate_input_tokens(body)
@@ -831,10 +931,30 @@ class ClaudeCodeProxy:
             return Response(json.dumps({"error": {"message": "No API key provided"}}),
                             status_code=401, media_type="application/json")
 
-        route = await self._route(user_message, session_key, body)
-        logger.info("路由 | session=%s | tier=%s | model=%s | conf=%.2f | source=%s | msg_len=%d | msg=%.60s",
-                    session_key, route["tier"], route["model"], route["confidence"],
-                    route["source"], len(user_message), user_message)
+        # ★ 检查文本模式覆盖（@model:xxx），命中则跳过路由，直接使用指定模型
+        text_mode_model, body = self._extract_text_mode_override(body)
+        if text_mode_model:
+            route = {
+                "tier": "text_mode",
+                "model": text_mode_model,
+                "confidence": 1.0,
+                "thinking_mode": None,
+                "thinking_level": None,
+                "prompt_policy": None,
+                "prompt_hint": None,
+                "source": "text_mode_override",
+                "routing_extra": {},
+                "metadata": {},
+            }
+            logger.info("text_mode_override | session=%s | model=%s | msg_len=%d | msg=%.60s",
+                        session_key, text_mode_model, len(user_message), user_message)
+            # 直接从 body 中提取最新用户消息（标记已被移除），用于后续流程
+            user_message, _ = self._extract_user_message(body)
+        else:
+            route = await self._route(user_message, session_key, body)
+            logger.info("路由 | session=%s | tier=%s | model=%s | conf=%.2f | source=%s | msg_len=%d | msg=%.60s",
+                        session_key, route["tier"], route["model"], route["confidence"],
+                        route["source"], len(user_message), user_message)
 
         # 1. 应用路由(替换 model/thinking/prompt_hint)
         modified_body = self._apply_route_to_body(body, route)
