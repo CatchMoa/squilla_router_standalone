@@ -1,5 +1,13 @@
 # squilla_router_standalone
 
+<p align="center">
+  <a href="https://github.com/CatchMoa/squilla_router_standalone"><img src="https://img.shields.io/github/stars/CatchMoa/squilla_router_standalone?style=for-the-badge&logo=github" alt="Stars"></a>
+  <a href="https://github.com/CatchMoa/squilla_router_standalone/releases"><img src="https://img.shields.io/github/v/release/CatchMoa/squilla_router_standalone?include_prereleases&style=for-the-badge&logo=github" alt="Release"></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.12%2B-blue?style=for-the-badge&logo=python" alt="Python 3.12+"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=for-the-badge" alt="Apache 2.0"></a>
+  <a href="https://github.com/CatchMoa/squilla_router_standalone/actions"><img src="https://img.shields.io/github/actions/workflow/status/CatchMoa/squilla_router_standalone/ci.yml?style=for-the-badge&label=CI" alt="CI"></a>
+</p>
+
 OpenSquilla 模型路由引擎的独立抽离包。
 
 一个自包含的 Python 包,完整复刻了 OpenSquilla 的 `squilla_router` 决策路径 ——
