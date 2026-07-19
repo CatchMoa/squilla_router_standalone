@@ -549,6 +549,9 @@ class ClaudeCodeProxy:
         )
         self._hold_store = RouterControlHoldStore()
         self._session_spend: dict[str, float] = {}
+        # 文本模式覆盖的短时缓存：{session_key: (model, expiry_monotonic)}
+        # 用于在单次用户请求的多轮工具调用中保持模型一致
+        self._text_mode_hold: dict[str, tuple[str, float]] = {}
         self._stats: dict[str, Any] = {
             "total_requests": 0, "routes": {}, "sources": {}, "start_time": time.time(),
         }
@@ -934,6 +937,8 @@ class ClaudeCodeProxy:
         # ★ 检查文本模式覆盖（@model:xxx），命中则跳过路由，直接使用指定模型
         text_mode_model, body = self._extract_text_mode_override(body)
         if text_mode_model:
+            # 新用户消息中检测到 @model:xxx → 缓存，供后续工具调用子请求使用
+            self._text_mode_hold[session_key] = (text_mode_model, time.monotonic())
             route = {
                 "tier": "text_mode",
                 "model": text_mode_model,
@@ -948,13 +953,36 @@ class ClaudeCodeProxy:
             }
             logger.info("text_mode_override | session=%s | model=%s | msg_len=%d | msg=%.60s",
                         session_key, text_mode_model, len(user_message), user_message)
-            # 直接从 body 中提取最新用户消息（标记已被移除），用于后续流程
+            # 从 body 中提取最新用户消息（标记已被移除），用于后续流程
             user_message, _ = self._extract_user_message(body)
         else:
-            route = await self._route(user_message, session_key, body)
-            logger.info("路由 | session=%s | tier=%s | model=%s | conf=%.2f | source=%s | msg_len=%d | msg=%.60s",
-                        session_key, route["tier"], route["model"], route["confidence"],
-                        route["source"], len(user_message), user_message)
+            # 未检测到 @model:xxx → 检查是否是工具调用子请求
+            messages = body.get("messages", [])
+            latest_role = messages[-1].get("role", "") if messages else ""
+            if latest_role == "tool" and session_key in self._text_mode_hold:
+                # 工具调用子请求 → 使用缓存中的模型
+                cached_model, _cached_ts = self._text_mode_hold[session_key]
+                route = {
+                    "tier": "text_mode",
+                    "model": cached_model,
+                    "confidence": 1.0,
+                    "thinking_mode": None,
+                    "thinking_level": None,
+                    "prompt_policy": None,
+                    "prompt_hint": None,
+                    "source": "text_mode_override_cached",
+                    "routing_extra": {},
+                    "metadata": {},
+                }
+                logger.info("text_mode_override_cached | session=%s | model=%s | msg_len=%d",
+                            session_key, cached_model, len(user_message))
+            else:
+                # 新用户消息或缓存不存在 → 清除缓存，走正常路由
+                self._text_mode_hold.pop(session_key, None)
+                route = await self._route(user_message, session_key, body)
+                logger.info("路由 | session=%s | tier=%s | model=%s | conf=%.2f | source=%s | msg_len=%d | msg=%.60s",
+                            session_key, route["tier"], route["model"], route["confidence"],
+                            route["source"], len(user_message), user_message)
 
         # 1. 应用路由(替换 model/thinking/prompt_hint)
         modified_body = self._apply_route_to_body(body, route)
