@@ -959,7 +959,17 @@ class ClaudeCodeProxy:
             # 未检测到 @model:xxx → 检查是否是工具调用子请求
             messages = body.get("messages", [])
             latest_role = messages[-1].get("role", "") if messages else ""
-            if latest_role == "tool" and session_key in self._text_mode_hold:
+            # Anthropic API 中工具结果以 role=user + type=tool_result 块传递，
+            # 兼容 role=tool 的旧格式。
+            _is_tool_result = (
+                latest_role == "user"
+                and isinstance(messages[-1].get("content"), list)
+                and any(
+                    isinstance(b, dict) and b.get("type") == "tool_result"
+                    for b in messages[-1].get("content", [])
+                )
+            )
+            if (latest_role == "tool" or _is_tool_result) and session_key in self._text_mode_hold:
                 # 工具调用子请求 → 使用缓存中的模型
                 cached_model, _cached_ts = self._text_mode_hold[session_key]
                 route = {
