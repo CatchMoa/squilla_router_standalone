@@ -40,10 +40,7 @@ dev = [
 squilla-router-proxy = "squilla_router_standalone.proxy:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["squilla_router_standalone"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"squilla_router_standalone/models/v4.2_phase3_inference" = "squilla_router_standalone/models/v4.2_phase3_inference"
+packages = ["src/squilla_router_standalone"]
 
 # Bundle assets are data, not Python source — exclude .bin/.pkl/.joblib/.onnx from lint/type checks
 [tool.ruff]
