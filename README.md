@@ -194,56 +194,80 @@ result = await compact_context(CompactionRequest(
 # result.kept_entries: 保留的最近条目
 ```
 
+### Text Mode Override
+
+在用户消息中嵌入 `@model:xxx` 标记,可跳过路由引擎,直接使用指定模型。适用于:
+- 手动指定模型进行调试
+- 对特定任务选择特定模型
+- 临时覆盖路由决策
+
+支持以下格式:
+- `@model:c3` — 映射到配置文件中 tier `c3` 对应的模型
+- `@model:claude-opus-4-8` — 直接使用模型 ID
+
+标记仅在最新一条 `role=user` 的消息中匹配,不会影响历史消息。标记本身在转发前被移除,不会传递给目标 API。
+
+在单次用户请求的多轮工具调用中,缓存保持生效,避免中途切换模型导致的 KV-cache 失效。
+
+```text
+用户消息: 分析这个项目 @model:c3
+→ 路由引擎跳过,直接使用 c3 配置的模型
+→ 后续工具调用子请求保持同一模型,直至新用户消息
+```
+
 ---
 
 ## 项目结构
 
 ```
 squilla_router_standalone/
-├── __init__.py                 # 公共 API: Router, SquillaRouterConfig
 ├── pyproject.toml              # 包配置 + 依赖声明
 ├── README.md                   # 本文件
 ├── .gitignore
+├── .github/
+│   └── workflows/
+│       └── ci.yml              # CI 工作流
 │
-├── api.py                      # 高层入口: Router.route() → RoutingResult
-├── config.py                   # SquillaRouterConfig(pydantic BaseSettings)
-├── catalog.py                  # 配置驱动的 TierCapability 查询
-├── pricing.py                  # 静态价格表
-├── history.py                  # 路由历史存储(5 条 + 1800s 窗口)
-├── decision_record.py          # 文件版 JSONL 决策记录持久化
-├── router_tiers.py             # Tier 定义(逐字移植)
-├── router_control.py           # 路由控制(逐字移植)
-├── router_runtime_diagnostics.py  # 运行时诊断(逐字移植)
-├── prompt_cache.py             # Prompt cache 指标(纯函数)
-├── tool_result_projection.py   # 工具结果投影(纯函数)
-├── compaction.py               # 上下文压缩(LLM + fallback)
-├── compaction_state.py         # 结构化压缩状态
-│
-├── proxy.py                    # 薄 HTTP 代理层(Starlette)
-├── __main__.py                 # python -m 入口
-│
-├── engine/
-│   ├── __init__.py
-│   ├── pipeline.py             # TurnContext dataclass
-│   ├── routing/
-│   │   ├── __init__.py
-│   │   ├── policy.py           # 8 门控策略引擎(逐字移植)
-│   │   ├── policy_data.py      # 策略数据(投诉词等)
-│   │   ├── heuristic.py        # 启发式规则
-│   │   └── calibration.py      # 校准(逐字移植)
-│   └── steps/
-│       └── squilla_router.py   # 核心编排(1487 行)
-│
-├── squilla_router/
-│   ├── __init__.py
-│   ├── controller.py           # Thinking/Prompt 控制器(逐字移植)
-│   └── v4_phase3.py            # V4 分类器(逐字移植)
-│
-├── models/
-│   └── v4.2_phase3_inference/  # ML bundle(76M, 复制)
-│
-└── tests/
-    └── test_router.py          # 20 个测试覆盖全部门控
+└── src/squilla_router_standalone/
+    ├── __init__.py                 # 公共 API: Router, SquillaRouterConfig
+    ├── __main__.py                 # python -m 入口
+    ├── api.py                      # 高层入口: Router.route() → RoutingResult
+    ├── config.py                   # SquillaRouterConfig(pydantic BaseSettings)
+    ├── catalog.py                  # 配置驱动的 TierCapability 查询
+    ├── pricing.py                  # 静态价格表
+    ├── history.py                  # 路由历史存储(5 条 + 1800s 窗口)
+    ├── decision_record.py          # 文件版 JSONL 决策记录持久化
+    ├── router_tiers.py             # Tier 定义(逐字移植)
+    ├── router_control.py           # 路由控制(逐字移植)
+    ├── router_runtime_diagnostics.py  # 运行时诊断(逐字移植)
+    ├── proxy.py                    # 薄 HTTP 代理层(Starlette) + 文本模式覆盖
+    ├── prompt_cache.py             # Prompt cache 指标(纯函数)
+    ├── tool_result_projection.py   # 工具结果投影(纯函数)
+    ├── compaction.py               # 上下文压缩(LLM + fallback)
+    ├── compaction_state.py         # 结构化压缩状态
+    │
+    ├── engine/
+    │   ├── __init__.py
+    │   ├── pipeline.py             # TurnContext dataclass
+    │   ├── routing/
+    │   │   ├── __init__.py
+    │   │   ├── policy.py           # 8 门控策略引擎(逐字移植)
+    │   │   ├── policy_data.py      # 策略数据(投诉词等)
+    │   │   ├── heuristic.py        # 启发式规则
+    │   │   └── calibration.py      # 校准(逐字移植)
+    │   └── steps/
+    │       └── squilla_router.py   # 核心编排(1487 行)
+    │
+    ├── squilla_router/
+    │   ├── __init__.py
+    │   ├── controller.py           # Thinking/Prompt 控制器(逐字移植)
+    │   └── v4_phase3.py            # V4 分类器(逐字移植)
+    │
+    ├── models/
+    │   └── v4.2_phase3_inference/  # ML bundle(76M, 复制)
+    │
+    └── tests/
+        └── test_router.py          # 20 个测试覆盖全部门控
 ```
 
 ---
@@ -260,9 +284,11 @@ squilla_router_standalone/
 - 启发式降级(基于长度/附件)
 - 交互式配置向导(SetupWizard)
 - 模型自动发现(Anthropic/OpenAI/DashScope)
+- 文本模式覆盖(`@model:xxx` 跳过路由,直接使用指定模型,支持多轮工具调用缓存)
 - Tool Result Projection(纯函数 + proxy 集成)
 - Prompt Cache 注入(纯函数 + proxy 集成)
 - Context Compaction(独立模块)
+- GitHub CI 工作流
 
 ### 不在此包 ❌
 - **Self-learning 离线训练器**:LightGBM 增量训练/promotion/rollback 不移植。
