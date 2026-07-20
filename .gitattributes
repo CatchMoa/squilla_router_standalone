@@ -1,0 +1,8 @@
+# Force LF line endings for text artifacts in model bundle to match artifact_manifest.json
+# (manifest was generated on Unix/LF — CRLF would break size checks)
+src/squilla_router_standalone/models/** text eol=lf
+
+# Explicitly mark binary artifact types so git does not treat them as text
+*.onnx binary
+*.joblib binary
+*.pkl binary
