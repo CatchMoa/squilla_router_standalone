@@ -25,9 +25,10 @@ dependencies = [
 [project.optional-dependencies]
 ml = [
     "numpy>=1.26",
-    "scikit-learn>=1.4",
+    "scikit-learn>=1.8,<1.9",
     "onnxruntime>=1.17",
     "lightgbm>=4.3",
+    "tokenizers>=0.19",       # BGE ONNX tokenizer
 ]
 dev = [
     "pytest>=8.0",
