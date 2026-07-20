@@ -27,3 +27,5 @@ Thumbs.db
 # Project-specific
 *.toml
 !pyproject.toml
+
+.claude/
